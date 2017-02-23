@@ -1,5 +1,5 @@
 {
-  "name": "lvcc-cmx-notification",
+  "name": "cisco-cmx-notification",
   "version": "1.0.0",
   "description": "CMX Notification Example",
   "main": "cmxNotificationListener.js",
@@ -17,7 +17,6 @@
     "express": "~3.2.6",
     "fs-extra": "~0.6.1",
     "node-cache": "^4.1.1",
-    "optimist": "~0.6.0",
     "winston": "~0.7.2"
   },
   "devDependencies": {

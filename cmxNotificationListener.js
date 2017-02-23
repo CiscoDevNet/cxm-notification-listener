@@ -8,42 +8,24 @@ var fs = require('fs');
 var os=require('os');
 var table = require('cli-table');
 const NodeCache = require( "node-cache" );
-const currentDeviceCache = new NodeCache( { stdTTL: 1200, checkperiod: 120 } );
-const uniqueDevicesCache = new NodeCache( { stdTTL: 0, checkperiod: 0 } );
-var optimist = require('optimist')
-.usage('Usage: $0 -h')
-.describe('h', 'Display the usage message')
-.describe('eventListenerPort', 'Local port to listen for events');
-var argv = optimist.argv;
+const notifySourceCache = new NodeCache( { stdTTL: serverConfig.options.notifyTtl, checkperiod: serverConfig.options.notifyCheckPeriod } );
+const currentDeviceCache = new NodeCache( { stdTTL: serverConfig.options.currentDeviceTtl, checkperiod: serverConfig.options.currentDeviceCheckPeriod } );
+const uniqueDevicesCache = new NodeCache( { stdTTL: serverConfig.options.uniqueDeviceTtl, checkperiod: serverConfig.options.uniqueDeviceCheckPeriod } );
 var pkg;
 var notifyCounter = 0;
-var statsCounter = 0;
-var fileUpdateCounter = 0;
-var startDate = new Date();
+var infoSummaryUpdateDate = new Date();
+var infoDetailUpdateDate = new Date();
+const LOG_SUMMARY_INFO_UPDATE_INTERVAL = serverConfig.options.logSummaryInfoStatsInterval * 1000;
+const LOG_DETAIL_INFO_UPDATE_INTERVAL = serverConfig.options.logDetailInfoStatsInterval * 1000;
 
-var OUTPUT_INFO_JSON_FILE = "./output/info.json";
-var OUTPUT_NOTIFY_JSON_FILE = "./output/notify.json";
-var OUTPUT_FLOOR_JSON_FILE = "./output/floor.json";
-var STATS_MAX_COUNT = 5;
-var FILE_WRITE_MAX_COUNT = 30;
+const OUTPUT_TOTAL_SUMMARY_INFO_JSON_FILE = "./output/totalSummaryInfo.json";
+const OUTPUT_NOTIFY_SUMMARY_INFO_JSON_FILE = "./output/notifySummaryInfo.json";
+const OUTPUT_FLOOR_INFO_JSON_FILE = "./output/floorInfo.json";
 pkg = require('./package.json');
 var eventListener = express();
 
 eventListener.use(express.bodyParser());
 eventListener.use(express.cookieParser());
-
-if (argv.h) {
-    optimist.showHelp();
-    process.exit(0);
-}
-
-function parseOptions(argv) {
-    for (var optionName in serverConfig.options) {
-        if (argv[optionName]) {
-            serverConfig.options[optionName] = argv[optionName];
-        }
-    }
-}
 
 //-----------------------------------------------------------------------
 //Post Listener: /api/v1/notify
@@ -52,104 +34,33 @@ function parseOptions(argv) {
 //             The event notification will be processed
 //-----------------------------------------------------------------------
 eventListener.post('/api/v1/notify', function(req, res) {
-    //logger.debug("Post notificiation from: " + req.ip + " body: " + util.inspect(req.body, {depth: null}));
+    logger.debug("Post notification from: %s body: %s", req.ip, util.inspect(req.body, {depth: null}));
     var bodyData = req.body;
     var notificationData = bodyData.notifications[0];
-    //logger.debug("Device MAC: " + notificationData.deviceId + " from IP: " + req.ip);
+    logger.debug("Device MAC: %s from IP: %s", notificationData.deviceId, req.ip);
+    var notifySource = notifySourceCache.get(req.ip);
+    if (notifySource != undefined && notifySource.sourceNotificationIp != undefined) {
+        ++notifySource.notifyCounter;
+    } else {
+        notifySource = {};
+        notifySource.sourceNotificationIp = req.ip;
+        notifySource.notifyCounter = 1;
+    }
+    notifySourceCache.set(req.ip, notifySource, function( err, success ){
+    });
 	++notifyCounter;
 	var currentDate = new Date();
-	var currentDateDiff = currentDate - startDate;
-	if (currentDateDiff >= 60000) {
-		messagesInterval = (notifyCounter / currentDateDiff) * 1000;
-        var infoTable = new table();
-        var currentDevCount = currentDeviceCache.getStats().keys;
-        var uniqueDevCount = uniqueDevicesCache.getStats().keys;
-        infoTable.push(
-            { 'Current Device Count': currentDevCount },
-            { 'Unique Device Count': uniqueDevCount },
-            { 'Messages Per Second': messagesInterval.toFixed(2) }
-        );
-        logger.info("Info Stats\n" + infoTable.toString());
-		startDate = new Date();
-		notifyCounter = 0;
-		++statsCounter;
-		++fileUpdateCounter;
-		if (statsCounter > STATS_MAX_COUNT) {
+	var infoSummaryUpdateDateDiff = currentDate - infoSummaryUpdateDate;
+	if (infoSummaryUpdateDateDiff >= LOG_SUMMARY_INFO_UPDATE_INTERVAL) {
+        refreshSummaryInfo(true);
+    }
 
-            if (fileUpdateCounter > FILE_WRITE_MAX_COUNT) {
-                var infoObj = {
-                    date: startDate,
-                    currentDeviceCount: currentDevCount,
-                    uniqueDeviceCount: uniqueDevCount,
-                    messagesPerSecond: messagesInterval.toFixed(2)
-                };
-                fs.appendFile(OUTPUT_INFO_JSON_FILE, JSON.stringify(infoObj) + ",\n", function (err) {
-                    if (err) return console.log(err);
-                });
-            }
-            currentDeviceCache.keys(function( err, mykeys ){
-                if( !err ){
-                    var notifySources = {};
-                    var floorIds = {};
-                    mykeys.forEach(function (mykey) {
-                        value = currentDeviceCache.get(mykey);
-                        if (value != undefined && value.sourceNotificationIp != undefined) {
-                            if (notifySources[value.sourceNotificationIp] == undefined) {
-                                notifySources[value.sourceNotificationIp] = 1;
-                            } else {
-                                ++notifySources[value.sourceNotificationIp];
-                            }
-                            var arrayMapHierarchy = value.locationMapHierarchy.split(">");
-                            mapHierarchy = arrayMapHierarchy[0] + ">" + arrayMapHierarchy[1] + ">" + arrayMapHierarchy[2];
-                            if (floorIds[mapHierarchy] == undefined) {
-                                floorIds[mapHierarchy] = 1;
-                            } else {
-                                ++floorIds[mapHierarchy];
-                            }
-                        }
-                    });
-                    var notifyTable = new table({
-                        head: ['Notify Source', 'Count']
-                        , colWidths: [20, 10]
-                    });
-                    var notifyTableObj = [];
-		            for (var notifySource in notifySources) {
-                        notifyTable.push([notifySource, notifySources[notifySource]]);
-                        notifyTableObj.push({source: notifySource, count: notifySources[notifySource]});
-                    }
-                    logger.info("Notification Stats\n" + notifyTable.toString());
-                    if (fileUpdateCounter > FILE_WRITE_MAX_COUNT) {
-                        var notifyObj = {date: startDate, noitfyTable: notifyTableObj};
-                        fs.appendFile(OUTPUT_NOTIFY_JSON_FILE, JSON.stringify(notifyObj) + ",\n", function (err) {
-                            if (err) return console.log(err);
-                        });
-                    }
-                    var floorCountTable = new table({
-                        head: ['Floor Name', 'Count']
-                        , colWidths: [75, 10]
-                    });
-                    var floorTableObj = [];
-                    for (var floorId in floorIds) {
-                        floorCountTable.push([floorId, floorIds[floorId]]);
-                        floorTableObj.push({name: floorId, count: floorIds[floorId]})
-                    }
-                    logger.info("Floor Stats\n" + floorCountTable.toString());
-                    if (fileUpdateCounter > FILE_WRITE_MAX_COUNT) {
-                        var floorObj = {date: startDate, floorTable: floorTableObj};
-                        fs.appendFile(OUTPUT_FLOOR_JSON_FILE, JSON.stringify(floorObj) + ",\n", function (err) {
-                            if (err) return console.log(err);
-                        });
-                        fileUpdateCounter = 0;
-                    }
-                } else {
-                	logger.error("Errors while getting keys");
-				}
-            });
-            statsCounter = 0;
-		}
-	}
+    var infoDetailUpdateDateDiff = currentDate - infoDetailUpdateDate;
+    if (infoDetailUpdateDateDiff > LOG_DETAIL_INFO_UPDATE_INTERVAL) {
+        refreshDetailInfo(true);
+    }
 	var obj = { sourceNotificationIp: req.ip, locationCoordinate: notificationData.locationCoordinate, floorId: notificationData.floorId, locationMapHierarchy: notificationData.locationMapHierarchy, notificationTime: currentDate.toString() };
-    currentDeviceCache.set(notificationData.deviceId, obj, 1200, function( err, success ){
+    currentDeviceCache.set(notificationData.deviceId, obj, function( err, success ){
 	});
     uniqueDevicesCache.set(notificationData.deviceId, obj, function( err, success ){
     });
@@ -157,7 +68,7 @@ eventListener.post('/api/v1/notify', function(req, res) {
 });
 
 //-----------------------------------------------------------------------
-//Get Listener: /api/v1/device/{deviceId}
+// Get: /api/v1/device/{deviceId}
 //
 //Description: Returns device information for the specified device ID
 //-----------------------------------------------------------------------
@@ -168,6 +79,227 @@ eventListener.get('/api/v1/device/:deviceId', function(req, res) {
 	}
 	return res.json(value);
 });
+
+//-----------------------------------------------------------------------
+// Get: /api/v1/system
+//
+//Description: Returns system information from all the notification sources
+//-----------------------------------------------------------------------
+eventListener.get('/api/v1/system', function(req, res) {
+    if (req.query.refresh !== undefined && req.query.refresh === "true") {
+        refreshSummaryInfo(false);
+    }
+    fs.readFile(OUTPUT_TOTAL_SUMMARY_INFO_JSON_FILE, function (err, data) {
+        if (err) throw err;
+        return res.json(JSON.parse(data));
+    });
+});
+
+//-----------------------------------------------------------------------
+// Get: /api/v1/notifications
+//
+//Description: Returns information about all the notification sources
+//-----------------------------------------------------------------------
+eventListener.get('/api/v1/notifications', function(req, res) {
+    if (req.query.refresh !== undefined && req.query.refresh === "true") {
+        refreshDetailInfo(false);
+    }
+    fs.readFile(OUTPUT_NOTIFY_SUMMARY_INFO_JSON_FILE, function (err, data) {
+        if (err) throw err;
+        return res.json(JSON.parse(data));
+    });
+});
+
+//-----------------------------------------------------------------------
+// Get: /api/v1/notifications/{sourceIp}
+//
+//Description: Returns information about a specific notification source
+//-----------------------------------------------------------------------
+eventListener.get('/api/v1/notifications/:sourceIp', function(req, res) {
+    logger.debug("Request to get notifications for a specific source params: " + util.inspect(req.params));
+    if (req.query.refresh !== undefined && req.query.refresh === "true") {
+        refreshDetailInfo(false);
+    }
+    fs.readFile(OUTPUT_NOTIFY_SUMMARY_INFO_JSON_FILE, function (err, data) {
+        if (err) throw err;
+        var jsonObject = JSON.parse(data);
+        for (var i = 0; i < jsonObject.notifySources.length; ++i) {
+            if (jsonObject.notifySources[i].sourceNotificationIp === req.params.sourceIp) {
+                return res.json(jsonObject.notifySources[i]);
+            }
+        }
+        return res.send(404);
+    });
+});
+
+//-----------------------------------------------------------------------
+// Get: /api/v1/floors
+//
+//Description: Returns floor information from all the notification sources
+//-----------------------------------------------------------------------
+eventListener.get('/api/v1/floors', function(req, res) {
+    if (req.query.refresh !== undefined && req.query.refresh === "true") {
+        refreshDetailInfo(false);
+    }
+    fs.readFile(OUTPUT_FLOOR_INFO_JSON_FILE, function (err, data) {
+        if (err) throw err;
+        return res.json(JSON.parse(data));
+    });
+});
+
+//-----------------------------------------------------------------------
+// Get: /api/v1/floors/{sourceIp}
+//
+//Description: Returns floor information about a specific notification source
+//-----------------------------------------------------------------------
+eventListener.get('/api/v1/floors/:sourceIp', function(req, res) {
+    logger.debug("Request to get floor information for a specific source params: " + util.inspect(req.params));
+    if (req.query.refresh !== undefined && req.query.refresh === "true") {
+        refreshDetailInfo(false);
+    }
+    fs.readFile(OUTPUT_FLOOR_INFO_JSON_FILE, function (err, data) {
+        if (err) throw err;
+        var jsonObject = JSON.parse(data);
+        if (jsonObject.floors[req.params.sourceIp] === undefined) {
+            return res.send(404);
+        } else {
+            return res.json(jsonObject.floors[req.params.sourceIp]);
+        }
+    });
+});
+
+//-----------------------------------------------------------------------
+//Function: refreshSummaryInfo
+//
+//Description: Refresh the summary notification information
+//
+//Parameters: doLogInfo - If set to true the information refreshed will be logged into log file
+//
+//Returns: None
+//-----------------------------------------------------------------------
+function refreshSummaryInfo(doLogInfo) {
+    var currentRefreshDate = new Date();
+    var updateDateDiff = currentRefreshDate - infoSummaryUpdateDate;
+
+    var messagesInterval = (notifyCounter / updateDateDiff) * 1000;
+    var totalInfoTable = new table();
+    var currentDevCount = currentDeviceCache.getStats().keys;
+    var uniqueDevCount = uniqueDevicesCache.getStats().keys;
+    totalInfoTable.push(
+        {'Current Device Count': currentDevCount},
+        {'Unique Device Count': uniqueDevCount},
+        {'Messages Per Second': messagesInterval.toFixed(2)}
+    );
+    if (doLogInfo) {
+        logger.info("Total Information Stats\n" + totalInfoTable.toString());
+    }
+    var infoObj = {
+        date: currentRefreshDate,
+        currentDeviceCount: currentDevCount,
+        uniqueDeviceCount: uniqueDevCount,
+        messagesPerSecond: messagesInterval.toFixed(2)
+    };
+    fs.writeFile(OUTPUT_TOTAL_SUMMARY_INFO_JSON_FILE, JSON.stringify(infoObj), function (err) {
+        if (err) return console.log(err);
+    });
+    if (doLogInfo) {
+        infoSummaryUpdateDate = new Date();
+        notifyCounter = 0;
+    }
+}
+
+//-----------------------------------------------------------------------
+//Function: refreshDetailInfo
+//
+//Description: Refresh the detailed notification information
+//
+//Parameters: doLogInfo - If set to true the information refreshed will be logged into log file
+//
+//Returns: None
+//-----------------------------------------------------------------------
+function refreshDetailInfo(doLogInfo) {
+    var currentRefreshDate = new Date();
+    var updateDateDiff = currentRefreshDate - infoDetailUpdateDate;
+    currentDeviceCache.keys(function( err, mykeys ){
+        if( !err ){
+            var notifySources = {};
+            var floorIds = {};
+            mykeys.forEach(function (mykey) {
+                value = currentDeviceCache.get(mykey);
+                if (value != undefined && value.sourceNotificationIp != undefined) {
+                    if (notifySources[value.sourceNotificationIp] == undefined) {
+                        notifySources[value.sourceNotificationIp] = 1;
+                    } else {
+                        ++notifySources[value.sourceNotificationIp];
+                    }
+                    var arrayMapHierarchy = value.locationMapHierarchy.split(">");
+                    var mapHierarchy = arrayMapHierarchy[0] + ">" + arrayMapHierarchy[1] + ">" + arrayMapHierarchy[2];
+                    if (floorIds[value.sourceNotificationIp] === undefined) {
+                        floorIds[value.sourceNotificationIp] = {};
+                    }
+                    if (floorIds[value.sourceNotificationIp][mapHierarchy] === undefined) {
+                        floorIds[value.sourceNotificationIp][mapHierarchy] = 1;
+                    } else {
+                        ++floorIds[value.sourceNotificationIp][mapHierarchy];
+                    }
+                }
+            });
+            var notifyInfoTable = new table({
+                head: ['Notify Source', 'Device Count', 'Messages Per Second']
+                , colWidths: [20, 20, 30]
+            });
+            var notifyInfoTableObj = [];
+            for (var notifySource in notifySources) {
+                var notifySourceObj = notifySourceCache.get(notifySource);
+                var messagesInterval = (notifySourceObj.notifyCounter / updateDateDiff) * 1000;
+                notifyInfoTable.push([notifySourceObj.sourceNotificationIp, notifySources[notifySource], messagesInterval.toFixed(2)]);
+                notifyInfoTableObj.push({
+                    sourceNotificationIp: notifySourceObj.sourceNotificationIp,
+                    currentDeviceCount: notifySources[notifySource],
+                    messagesPerSecond: messagesInterval.toFixed(2)
+                });
+                if (doLogInfo) {
+                    notifySourceObj.notifyCounter = 0;
+                    notifySourceCache.set(notifySourceObj.sourceNotificationIp, notifySourceObj, function (err, success) {
+                    });
+                }
+            }
+            var notifyObj = {date: currentRefreshDate, notifySources: notifyInfoTableObj};
+            fs.writeFile(OUTPUT_NOTIFY_SUMMARY_INFO_JSON_FILE, JSON.stringify(notifyObj), function (err) {
+                if (err) return console.log(err);
+            });
+            if (doLogInfo) {
+                logger.info("Notify Information Stats\n" + notifyInfoTable.toString());
+            }
+            var floorCountTable = new table({
+                head: ['Notify Source', 'Floor Name', 'Count']
+                , colWidths: [20, 75, 10]
+            });
+            var floorTableObj = {};
+            for (var sourceIp in floorIds) {
+                for (var floorId in floorIds[sourceIp]) {
+                    floorCountTable.push([sourceIp, floorId, floorIds[sourceIp][floorId]]);
+                    if (floorTableObj[sourceIp] == undefined) {
+                        floorTableObj[sourceIp] = [];
+                        floorTableObj[sourceIp].push({floorName: floorId, currentDeviceCount: floorIds[sourceIp][floorId]});
+                    }
+                }
+            }
+            if (doLogInfo) {
+                logger.info("Floor Stats\n" + floorCountTable.toString());
+            }
+            var floorObj = {date: currentRefreshDate, floors: floorTableObj};
+            fs.writeFile(OUTPUT_FLOOR_INFO_JSON_FILE, JSON.stringify(floorObj), function (err) {
+                if (err) return console.log(err);
+            });
+        } else {
+            logger.error("Errors while getting keys");
+        }
+    });
+    if (doLogInfo) {
+        infoDetailUpdateDate = new Date();
+    }
+}
 
 //-----------------------------------------------------------------------
 //Handler: SIGINT
@@ -190,7 +322,6 @@ process.on('SIGINT', function() {
 //Returns: None
 //-----------------------------------------------------------------------
 function runMain() {
-    parseOptions(argv);
     eventListener.listen(serverConfig.options.eventListenerPort);
     logger.info("CMX Notification Listener: " + pkg.version + " listening on HTTP port " + serverConfig.options.eventListenerPort);
 }
